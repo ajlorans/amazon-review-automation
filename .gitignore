@@ -1,0 +1,47 @@
+# Environment variables
+.env
+
+# Credentials and tokens (NEVER commit these!)
+storage/credentials/
+storage/tokens/
+*.json
+!package.json
+!package-lock.json
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+build/
+dist/
+*.egg-info/
+
+# Video files - don't track video files
+*.mp4
+*.mov
+*.avi
+*.mkv
+*.m4v
+
+# Output files - don't track processed videos
+storage/outputs/
+storage/archive/
+storage/inputs/
+storage/logs/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
