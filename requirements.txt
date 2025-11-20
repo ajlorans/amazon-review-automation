@@ -14,3 +14,6 @@ google-auth-httplib2>=0.1.1
 google-auth-oauthlib>=1.1.0
 requests>=2.31.0
 
+# AWS S3 for Instagram uploads
+boto3>=1.34.0
+
