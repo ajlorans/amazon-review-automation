@@ -119,8 +119,11 @@ except Exception as e:
     print(f"\nPlease open this URL manually:\n{full_auth_url}\n")
 
 print("=" * 70)
-print("IMPORTANT: After authorizing, you'll be redirected to your redirect URI")
-print("The URL will contain a 'code' parameter - copy that code!")
+print("IMPORTANT: When authorizing the app:")
+print("  - Make sure to GRANT ALL PERMISSIONS")
+print("  - Check ALL permission boxes (especially 'video.upload')")
+print("  - After authorizing, you'll be redirected to your redirect URI")
+print("  - The URL will contain a 'code' parameter - copy that code!")
 print("=" * 70)
 
 # Step 4: Get authorization code from user
@@ -136,6 +139,12 @@ auth_code = input("Authorization Code: ").strip()
 if not auth_code:
     print("\n[ERROR] Authorization code is required!")
     sys.exit(1)
+
+# URL decode the authorization code in case it's URL-encoded
+try:
+    auth_code = urllib.parse.unquote(auth_code)
+except Exception:
+    pass  # If decoding fails, use the code as-is
 
 # Step 5: Exchange code for access token
 print("\nStep 5: Exchanging code for access token...")
@@ -153,70 +162,93 @@ token_data = {
 
 print("\n[INFO] Requesting access token...")
 try:
-    response = requests.post(token_url, json=token_data)
+    # TikTok API requires application/x-www-form-urlencoded, not JSON
+    response = requests.post(token_url, data=token_data)
     
     if response.status_code == 200:
         token_response = response.json()
         
-        if "data" in token_response and "access_token" in token_response["data"]:
+        # TikTok API returns access_token directly or wrapped in "data"
+        if "access_token" in token_response:
+            # Direct format (what TikTok actually returns)
+            access_token = token_response["access_token"]
+            refresh_token = token_response.get("refresh_token", "")
+            expires_in = token_response.get("expires_in", 0)
+            scope = token_response.get("scope", "")
+        elif "data" in token_response and "access_token" in token_response["data"]:
+            # Wrapped format (fallback)
             access_token = token_response["data"]["access_token"]
             refresh_token = token_response["data"].get("refresh_token", "")
             expires_in = token_response["data"].get("expires_in", 0)
-            
-            print("\n[SUCCESS] Access token received!")
-            print(f"  Token expires in: {expires_in} seconds")
-            
-            # Save to .env
-            env_file = Path(".env")
-            if env_file.exists():
-                content = env_file.read_text()
-                if "TIKTOK_ACCESS_TOKEN=" in content:
-                    lines = content.split('\n')
-                    new_lines = []
-                    for line in lines:
-                        if line.startswith("TIKTOK_ACCESS_TOKEN="):
-                            new_lines.append(f"TIKTOK_ACCESS_TOKEN={access_token}")
-                        else:
-                            new_lines.append(line)
-                    env_file.write_text('\n'.join(new_lines))
-                else:
-                    with open(env_file, 'a') as f:
-                        f.write(f"\nTIKTOK_ACCESS_TOKEN={access_token}\n")
-                print("\n[OK] Access token saved to .env file")
-            else:
-                print("\n[WARNING] .env file not found. Please add manually:")
-                print(f"TIKTOK_ACCESS_TOKEN={access_token}")
-            
-            # Test the token
-            print("\nStep 6: Testing access token...")
-            print("-" * 70)
-            
-            test_response = requests.get(
-                "https://open.tiktokapis.com/v2/user/info/",
-                headers={"Authorization": f"Bearer {access_token}"},
-                params={"fields": "open_id,union_id,avatar_url,display_name"}
-            )
-            
-            if test_response.status_code == 200:
-                user_data = test_response.json()
-                print("\n[SUCCESS] Token is valid!")
-                if "data" in user_data and "user" in user_data["data"]:
-                    user = user_data["data"]["user"]
-                    print(f"  Display Name: {user.get('display_name', 'N/A')}")
-                    print(f"  Open ID: {user.get('open_id', 'N/A')}")
-                
-                print("\n" + "=" * 70)
-                print("[COMPLETE] TikTok authentication setup successful!")
-                print("=" * 70)
-                print("\nYou can now upload videos to TikTok using:")
-                print("  python process.py --input video.mp4 --upload")
-            else:
-                print(f"\n[WARNING] Token test failed: {test_response.status_code}")
-                print(f"Response: {test_response.text}")
-                print("\nBut the token was saved - you can try using it anyway.")
+            scope = token_response["data"].get("scope", "")
         else:
             print("\n[ERROR] No access token in response")
             print(f"Response: {token_response}")
+            sys.exit(1)
+        
+        # If we got here, we have an access token
+        print("\n[SUCCESS] Access token received!")
+        print(f"  Token expires in: {expires_in} seconds")
+        
+        # Check and display scopes
+        if scope:
+            print(f"  Authorized scopes: {scope}")
+            if "video.upload" not in scope:
+                print("\n  [WARNING] 'video.upload' scope is missing!")
+                print("  This token cannot upload videos.")
+                print("  You need to re-authorize and grant ALL permissions.")
+                print("  When authorizing, make sure to check ALL permission boxes.")
+        else:
+            print("  [WARNING] Could not verify scopes - make sure 'video.upload' is authorized")
+        
+        # Save to .env
+        env_file = Path(".env")
+        if env_file.exists():
+            content = env_file.read_text()
+            if "TIKTOK_ACCESS_TOKEN=" in content:
+                lines = content.split('\n')
+                new_lines = []
+                for line in lines:
+                    if line.startswith("TIKTOK_ACCESS_TOKEN="):
+                        new_lines.append(f"TIKTOK_ACCESS_TOKEN={access_token}")
+                    else:
+                        new_lines.append(line)
+                env_file.write_text('\n'.join(new_lines))
+            else:
+                with open(env_file, 'a') as f:
+                    f.write(f"\nTIKTOK_ACCESS_TOKEN={access_token}\n")
+            print("\n[OK] Access token saved to .env file")
+        else:
+            print("\n[WARNING] .env file not found. Please add manually:")
+            print(f"TIKTOK_ACCESS_TOKEN={access_token}")
+        
+        # Test the token
+        print("\nStep 6: Testing access token...")
+        print("-" * 70)
+        
+        test_response = requests.get(
+            "https://open.tiktokapis.com/v2/user/info/",
+            headers={"Authorization": f"Bearer {access_token}"},
+            params={"fields": "open_id,union_id,avatar_url,display_name"}
+        )
+        
+        if test_response.status_code == 200:
+            user_data = test_response.json()
+            print("\n[SUCCESS] Token is valid!")
+            if "data" in user_data and "user" in user_data["data"]:
+                user = user_data["data"]["user"]
+                print(f"  Display Name: {user.get('display_name', 'N/A')}")
+                print(f"  Open ID: {user.get('open_id', 'N/A')}")
+            
+            print("\n" + "=" * 70)
+            print("[COMPLETE] TikTok authentication setup successful!")
+            print("=" * 70)
+            print("\nYou can now upload videos to TikTok using:")
+            print("  python process.py --input video.mp4 --upload")
+        else:
+            print(f"\n[WARNING] Token test failed: {test_response.status_code}")
+            print(f"Response: {test_response.text}")
+            print("\nBut the token was saved - you can try using it anyway.")
     else:
         print(f"\n[ERROR] Failed to get access token: {response.status_code}")
         print(f"Response: {response.text}")

@@ -6,10 +6,12 @@ Usage:
 
 This script:
 1. Normalizes the input video
-2. Converts to vertical 9:16 format (1080x1920)
-3. Adds CTA overlay with Amazon creator link
-4. Exports to platform-specific folders
-5. Generates metadata files for each platform
+2. Exports YouTube videos in original format (landscape, full length)
+3. Converts Instagram videos to vertical 9:16 format (1080x1920, full length)
+4. Converts TikTok videos to vertical 9:16 format (1080x1920, full length)
+5. Adds CTA overlay with Amazon creator link (currently disabled)
+6. Exports to platform-specific folders
+7. Generates metadata files for each platform
 """
 
 import argparse
@@ -17,7 +19,7 @@ import json
 import shutil
 from pathlib import Path
 from datetime import datetime
-from moviepy import VideoFileClip, TextClip, CompositeVideoClip
+from moviepy import VideoFileClip, TextClip, CompositeVideoClip, ColorClip
 import config
 
 # Import uploaders (optional - only if upload is enabled)
@@ -30,25 +32,56 @@ except ImportError:
 
 def normalize_video(clip: VideoFileClip) -> VideoFileClip:
     """
-    Normalize the input video.
+    Normalize the input video and fix VFR (Variable Frame Rate) issues.
     
-    This function ensures consistent frame rate and audio settings.
-    For MVP, we'll standardize to 30fps and ensure audio is present.
+    Phone videos often have Variable Frame Rate, which causes audio-video sync issues.
+    This function converts VFR to CFR (Constant Frame Rate) while preserving the original
+    frame rate, ensuring audio stays in sync.
     
     Args:
         clip: Input video clip
         
     Returns:
-        Normalized video clip
+        Normalized video clip with constant frame rate and synced audio
     """
-    # Standardize frame rate to 30fps
-    # Note: FPS will be set during export, but we can note it here
-    if clip.fps != 30:
-        print(f"  Note: Video FPS is {clip.fps:.2f}, will be converted to 30fps on export")
+    original_fps = clip.fps
     
-    # Ensure audio is present (if original has no audio, we'll keep it silent)
+    # Phone videos are often VFR (Variable Frame Rate)
+    # Convert to CFR (Constant Frame Rate) to fix sync issues
+    # Use set_fps with change_duration=False to preserve audio sync
+    print(f"  Original FPS: {original_fps:.2f}")
+    
+    # Round to nearest common frame rate (23.976, 24, 25, 29.97, 30, 60)
+    # This handles slight variations in phone recordings
+    common_fps = [23.976, 24, 25, 29.97, 30, 60]
+    target_fps = min(common_fps, key=lambda x: abs(x - original_fps))
+    
+    # If close to a common FPS, use that; otherwise use the original
+    if abs(original_fps - target_fps) < 0.5:
+        normalized_fps = target_fps
+    else:
+        # Use original FPS, rounded to 2 decimals
+        normalized_fps = round(original_fps, 2)
+    
+    # Convert VFR to CFR while preserving audio sync
+    # change_duration=False ensures audio timing stays correct
+    if abs(clip.fps - normalized_fps) > 0.01:  # Only convert if significantly different
+        print(f"  Converting VFR to CFR: {original_fps:.2f} → {normalized_fps:.2f} fps")
+        clip = clip.set_fps(normalized_fps, change_duration=False)
+        print(f"  [OK] Frame rate normalized (audio sync preserved)")
+    else:
+        print(f"  [OK] Frame rate is already constant ({normalized_fps:.2f} fps)")
+    
+    # Ensure audio is present and properly synced
     if clip.audio is None:
-        print("Warning: Input video has no audio track.")
+        print("  Warning: Input video has no audio track.")
+    else:
+        # Explicitly ensure audio is set to match video duration
+        # This prevents audio drift during processing
+        if abs(clip.audio.duration - clip.duration) > 0.1:
+            print(f"  Warning: Audio duration ({clip.audio.duration:.2f}s) doesn't match video ({clip.duration:.2f}s)")
+            print(f"  Adjusting audio to match video duration...")
+            clip = clip.set_audio(clip.audio.set_duration(clip.duration))
     
     return clip
 
@@ -89,10 +122,10 @@ def convert_to_vertical(clip: VideoFileClip) -> VideoFileClip:
     """
     Convert video to vertical 9:16 format (1080x1920).
     
-    Strategy:
-    - If video is wider than tall: crop center and resize
-    - If video is taller than wide: crop center and resize
-    - Use blurred background if needed (for MVP, we'll use center crop)
+    Strategy: Scale to fit (minimizes cropping and zoom)
+    - Scales video to fit within target dimensions while maintaining aspect ratio
+    - Adds letterboxing/pillarboxing if needed (black bars)
+    - This prevents important content from being cropped out
     
     Args:
         clip: Input video clip
@@ -108,34 +141,36 @@ def convert_to_vertical(clip: VideoFileClip) -> VideoFileClip:
     current_height = clip.h
     current_aspect = current_width / current_height
     
-    # Calculate how to crop and resize
-    if current_aspect > target_aspect:
-        # Video is wider than target (landscape)
-        # Crop to match target aspect ratio
-        new_height = current_height
-        new_width = int(current_height * target_aspect)
-        x_center = current_width / 2
-        x1 = int(x_center - new_width / 2)
-        x2 = int(x_center + new_width / 2)
-        
-        # Crop horizontally (MoviePy 2.x uses cropped() instead of crop())
-        cropped = clip.cropped(x1=x1, x2=x2, y1=0, y2=current_height)
-    else:
-        # Video is taller than target (portrait or square)
-        # Crop to match target aspect ratio
-        new_width = current_width
-        new_height = int(current_width / target_aspect)
-        y_center = current_height / 2
-        y1 = int(y_center - new_height / 2)
-        y2 = int(y_center + new_height / 2)
-        
-        # Crop vertically (MoviePy 2.x uses cropped() instead of crop())
-        cropped = clip.cropped(x1=0, x2=current_width, y1=y1, y2=y2)
+    # Calculate scale factor to fit video within target dimensions
+    # We want to scale so the video fits completely within the target frame
+    scale_by_width = target_width / current_width
+    scale_by_height = target_height / current_height
     
-    # Resize to target dimensions (MoviePy 2.x uses resized() instead of resize())
-    vertical_clip = cropped.resized(new_size=(target_width, target_height))
+    # Use the smaller scale factor to ensure video fits completely
+    scale_factor = min(scale_by_width, scale_by_height)
     
-    return vertical_clip
+    # Calculate new dimensions after scaling
+    new_width = int(current_width * scale_factor)
+    new_height = int(current_height * scale_factor)
+    
+    # Resize video (this will fit within target dimensions)
+    scaled_clip = clip.resized(new_size=(new_width, new_height))
+    
+    # Create a black background at target size
+    background = ColorClip(size=(target_width, target_height), color=(0, 0, 0), duration=clip.duration)
+    
+    # Center the scaled video on the black background
+    # Calculate position to center the video
+    x_center = (target_width - new_width) // 2
+    y_center = (target_height - new_height) // 2
+    
+    # Composite the scaled video on the background
+    final_clip = CompositeVideoClip(
+        [background, scaled_clip.with_position((x_center, y_center))],
+        size=(target_width, target_height)
+    )
+    
+    return final_clip
 
 
 def add_cta_overlay(clip: VideoFileClip) -> CompositeVideoClip:
@@ -175,9 +210,76 @@ def add_cta_overlay(clip: VideoFileClip) -> CompositeVideoClip:
     return final_clip
 
 
+def calculate_instagram_bitrate(duration_seconds: float, target_size_mb: float = 95.0) -> str:
+    """
+    Calculate optimal bitrate for Instagram to stay under file size limit.
+    
+    Instagram Reels limit: 100MB
+    Formula: file_size_mb = (video_bitrate_mbps * duration + audio_bitrate_mbps * duration) / 8
+    
+    Args:
+        duration_seconds: Video duration in seconds
+        target_size_mb: Target file size in MB (default 95MB to leave margin)
+        
+    Returns:
+        Bitrate string in format "XXXXk" (e.g., "5000k")
+    """
+    # Audio bitrate is typically 192k = 0.192 Mbps
+    audio_bitrate_mbps = 0.192
+    
+    # Calculate maximum video bitrate to stay under target size
+    # file_size_mb = (video_bitrate_mbps * duration + audio_bitrate_mbps * duration) / 8
+    # Solving for video_bitrate_mbps:
+    # video_bitrate_mbps = (target_size_mb * 8 - audio_bitrate_mbps * duration) / duration
+    # video_bitrate_mbps = (target_size_mb * 8) / duration - audio_bitrate_mbps
+    
+    if duration_seconds <= 0:
+        duration_seconds = 1  # Prevent division by zero
+    
+    max_video_bitrate_mbps = (target_size_mb * 8) / duration_seconds - audio_bitrate_mbps
+    
+    # Convert to kbps and round down to nearest 100
+    max_video_bitrate_kbps = int(max_video_bitrate_mbps * 1000)
+    max_video_bitrate_kbps = (max_video_bitrate_kbps // 100) * 100  # Round down to nearest 100
+    
+    # Set minimum bitrate for quality to prevent lag
+    # Higher minimum ensures smoother playback even for longer videos
+    min_bitrate_kbps = 2500  # 2.5 Mbps minimum for smooth playback
+    # Set maximum bitrate for quality (max 8 Mbps = 8000k for smooth playback)
+    max_bitrate_kbps = 8000
+    
+    # For very long videos, we need to balance file size vs quality
+    # Use a more aggressive target size if needed, but prioritize quality
+    if max_video_bitrate_kbps < min_bitrate_kbps:
+        # Video would be too long for minimum bitrate - need to balance
+        # Check if using minimum bitrate would exceed 100MB
+        min_bitrate_size_mb = (min_bitrate_kbps / 1000 + audio_bitrate_mbps) * duration_seconds / 8
+        
+        if min_bitrate_size_mb <= 100:
+            # Can use minimum bitrate without exceeding 100MB
+            optimal_bitrate_kbps = min_bitrate_kbps
+        elif duration_seconds > 300:  # Over 5 minutes
+            # Very long video - use lower target but maintain reasonable quality
+            # Use 85MB target for very long videos
+            max_video_bitrate_mbps = (85.0 * 8) / duration_seconds - audio_bitrate_mbps
+            max_video_bitrate_kbps = int(max_video_bitrate_mbps * 1000)
+            max_video_bitrate_kbps = (max_video_bitrate_kbps // 100) * 100
+            # Maintain minimum of 2000k for quality (prevents lag)
+            optimal_bitrate_kbps = max(2000, min(max_bitrate_kbps, max_video_bitrate_kbps))
+        else:
+            # Moderately long video (2-5 min) - use calculated bitrate
+            # This ensures we stay under 100MB while maintaining quality
+            optimal_bitrate_kbps = max(2000, max_video_bitrate_kbps)  # Minimum 2000k for quality
+    else:
+        # Normal video - clamp between min and max
+        optimal_bitrate_kbps = min(max_bitrate_kbps, max(max_video_bitrate_kbps, min_bitrate_kbps))
+    
+    return f"{optimal_bitrate_kbps}k"
+
+
 def export_video(clip: CompositeVideoClip, output_path: Path, platform: str):
     """
-    Export video to specified path.
+    Export video to specified path with optimized settings.
     
     Args:
         clip: Video clip to export
@@ -185,18 +287,254 @@ def export_video(clip: CompositeVideoClip, output_path: Path, platform: str):
         platform: Platform name (for logging)
     """
     print(f"Exporting {platform} video to {output_path}...")
+    
+    # Platform-specific encoding settings
+    if platform == "instagram":
+        # Instagram: Dynamic bitrate to stay under 100MB limit
+        # Calculate optimal bitrate based on video duration
+        duration = clip.duration
+        bitrate = calculate_instagram_bitrate(duration)
+        estimated_size_mb = (float(bitrate[:-1]) / 1000 + 0.192) * duration / 8
+        print(f"  Video duration: {duration:.1f}s")
+        print(f"  Calculated bitrate: {bitrate} (estimated size: {estimated_size_mb:.1f}MB)")
+        audio_bitrate = "192k"
+        preset = "medium"  # Better quality encoding (slightly slower but smoother)
+    elif platform == "tiktok":
+        # TikTok: Similar to Instagram, but TikTok allows larger files
+        # Still optimize to keep reasonable file sizes
+        duration = clip.duration
+        # TikTok allows up to 287MB, but we'll use similar optimization
+        bitrate = calculate_instagram_bitrate(duration, target_size_mb=200.0)  # More lenient
+        audio_bitrate = "192k"
+        preset = "medium"  # Better quality encoding
+    else:  # youtube
+        # YouTube: Can use faster preset since it's landscape (less processing)
+        # YouTube allows much larger files, so we can use higher bitrate
+        bitrate = "10000k"  # 10 Mbps for landscape
+        audio_bitrate = "192k"
+        preset = "fast"
+    
+    # Use more threads for faster encoding (auto-detect or use more)
+    import multiprocessing
+    num_threads = min(multiprocessing.cpu_count(), 8)  # Use up to 8 threads
+    
+    # Build FFmpeg parameters
+    ffmpeg_params = [
+        '-movflags', '+faststart',  # Enable fast start for web playback
+        '-pix_fmt', 'yuv420p',  # Ensure compatibility
+        '-profile:v', 'high',  # Use high profile for better quality
+        '-level', '4.0',  # H.264 level 4.0 for compatibility
+        '-g', '30',  # Keyframe interval (1 keyframe per second at 30fps)
+        '-bf', '2',  # B-frames for better compression
+        '-b_strategy', '1',  # Adaptive B-frame placement
+    ]
+    
+    # Add Instagram and TikTok-specific optimizations for smoother playback
+    if platform in ["instagram", "tiktok"]:
+        ffmpeg_params.extend([
+            '-rc-lookahead', '30',  # Lookahead for better quality
+            '-refs', '3',  # Reference frames for better quality
+            '-trellis', '1',  # Trellis quantization for better quality
+        ])
+    
+    # Use the clip's actual FPS instead of forcing 30fps
+    # This preserves the original frame rate and prevents sync issues
+    output_fps = clip.fps
+    if output_fps is None or output_fps <= 0:
+        output_fps = 30  # Fallback to 30fps if FPS is invalid
+        print(f"  Warning: Invalid FPS, using 30fps as fallback")
+    else:
+        print(f"  Using source frame rate: {output_fps:.2f} fps")
+    
+    # Update keyframe interval to match frame rate (1 keyframe per second)
+    # Remove the old '-g' parameter and add a new one based on actual FPS
+    ffmpeg_params = [p for p in ffmpeg_params if p != '-g']
+    keyframe_interval = int(output_fps)  # 1 keyframe per second
+    ffmpeg_params.append('-g')
+    ffmpeg_params.append(str(keyframe_interval))
+    
+    # Add audio sync parameters to prevent drift
+    ffmpeg_params.extend([
+        '-async', '1',  # Audio sync method
+        '-vsync', 'cfr',  # Constant frame rate (ensures sync)
+    ])
+    
     clip.write_videofile(
         str(output_path),
         codec='libx264',
         audio_codec='aac',
-        fps=30,
-        preset='medium',  # Balance between speed and quality
-        threads=4
+        fps=output_fps,  # Use actual FPS instead of forcing 30
+        preset=preset,
+        bitrate=bitrate,
+        audio_bitrate=audio_bitrate,
+        threads=num_threads,
+        ffmpeg_params=ffmpeg_params,
+        audio_nbytes=4,  # 32-bit audio for better quality
+        audio_fps=44100  # Standard audio sample rate
     )
+    
+    # Verify file size for Instagram and re-encode if needed
+    if platform == "instagram":
+        file_size_mb = output_path.stat().st_size / (1024 * 1024)
+        print(f"  Actual file size: {file_size_mb:.1f}MB")
+        
+        if file_size_mb > 100:
+            print(f"  [WARNING] File size ({file_size_mb:.1f}MB) exceeds 100MB limit!")
+            print(f"  Re-encoding with lower bitrate to fit under 100MB...")
+            
+            # Calculate new bitrate to get under 100MB
+            # Use 90MB as target to leave margin
+            new_bitrate = calculate_instagram_bitrate(clip.duration, target_size_mb=90.0)
+            print(f"  New bitrate: {new_bitrate}")
+            
+            # Re-encode with lower bitrate (use same optimized settings)
+            # Use the same FPS and sync settings as the original encode
+            reencode_fps = clip.fps if clip.fps and clip.fps > 0 else 30
+            keyframe_interval = int(reencode_fps)
+            
+            ffmpeg_params = [
+                '-movflags', '+faststart',
+                '-pix_fmt', 'yuv420p',
+                '-profile:v', 'high',
+                '-level', '4.0',
+                '-g', str(keyframe_interval),
+                '-bf', '2',
+                '-b_strategy', '1',
+                '-rc-lookahead', '30',
+                '-refs', '3',
+                '-trellis', '1',
+                '-async', '1',  # Audio sync
+                '-vsync', 'cfr',  # Constant frame rate
+            ]
+            
+            clip.write_videofile(
+                str(output_path),
+                codec='libx264',
+                audio_codec='aac',
+                fps=reencode_fps,  # Use actual FPS
+                preset=preset,
+                bitrate=new_bitrate,
+                audio_bitrate=audio_bitrate,
+                threads=num_threads,
+                ffmpeg_params=ffmpeg_params,
+                audio_nbytes=4,
+                audio_fps=44100,
+                overwrite=True  # Overwrite the existing file
+            )
+            
+            # Check again
+            file_size_mb = output_path.stat().st_size / (1024 * 1024)
+            print(f"  New file size: {file_size_mb:.1f}MB")
+            
+            if file_size_mb > 100:
+                print(f"  [ERROR] File still too large ({file_size_mb:.1f}MB) after re-encoding!")
+                print(f"  [ERROR] Video may be too long. Consider splitting into shorter segments.")
+            else:
+                print(f"  [OK] File size now under 100MB limit")
+        else:
+            print(f"  [OK] File size under 100MB limit")
+    
     print(f"[OK] {platform} video exported successfully!")
 
 
-def generate_metadata(video_name: str, platform: str) -> dict:
+def extract_amazon_link(video_path: Path) -> str:
+    """
+    Extract Amazon product link from video filename or associated files.
+    
+    Supports multiple methods:
+    1. Filename format: video-name_https-amazon-com-dp-12345.mp4
+    2. Sidecar file: video-name.amazon or video-name.link
+    3. JSON mapping file: storage/inputs/video_links.json
+    
+    Args:
+        video_path: Path to the video file
+        
+    Returns:
+        Amazon product link, or empty string if not found
+    """
+    video_name = video_path.stem
+    video_dir = video_path.parent
+    
+    # Method 1: Check filename for Amazon link
+    # Format: video-name_https-amzn-to-3K7euOO.mp4 or video-name_https-amazon-com-dp-12345.mp4
+    if '_https-' in video_name or '_http-' in video_name:
+        # Extract the link part after the first underscore
+        parts = video_name.split('_', 1)
+        if len(parts) > 1:
+            link_part = parts[1]
+            amazon_link = link_part
+            
+            # Replace protocol pattern: https- -> https://
+            if amazon_link.startswith('https-'):
+                amazon_link = amazon_link.replace('https-', 'https://', 1)
+            elif amazon_link.startswith('http-'):
+                amazon_link = amazon_link.replace('http-', 'http://', 1)
+            
+            # Handle shortened Amazon links (amzn.to)
+            # Pattern: https://amzn-to-3K7euOO -> https://amzn.to/3K7euOO
+            if 'amzn-to-' in amazon_link:
+                # Replace amzn-to- with amzn.to/
+                amazon_link = amazon_link.replace('amzn-to-', 'amzn.to/')
+            elif amazon_link.startswith('https://amzn-to') or amazon_link.startswith('http://amzn-to'):
+                # Handle case where it's just amzn-to without the dash after
+                amazon_link = amazon_link.replace('amzn-to', 'amzn.to', 1)
+            
+            # Handle full Amazon URLs
+            # Replace domain pattern: amazon-com -> amazon.com
+            amazon_link = amazon_link.replace('-com', '.com')
+            amazon_link = amazon_link.replace('-co-uk', '.co.uk')
+            amazon_link = amazon_link.replace('-ca', '.ca')
+            amazon_link = amazon_link.replace('-de', '.de')
+            
+            # Replace path separators: dp-12345 -> dp/12345
+            amazon_link = amazon_link.replace('-dp-', '/dp/')
+            amazon_link = amazon_link.replace('-gp-product-', '/gp/product/')
+            
+            # Replace remaining hyphens with slashes for path segments
+            # But be careful - only replace hyphens that are part of the path, not in the domain
+            # Pattern: https://amzn.to/3K7euOO (already handled above)
+            # Pattern: https://amazon.com/dp/B08XYZ-1234 -> https://amazon.com/dp/B08XYZ/1234 (wrong)
+            # So we need to be smarter - only replace hyphens after the domain
+            
+            # For amzn.to links, the format is already correct after the above replacements
+            # For full amazon.com links, we need to handle product IDs carefully
+            
+            # Validate it looks like an Amazon URL
+            if ('amazon' in amazon_link.lower() or 'amzn.to' in amazon_link.lower()) and ('http://' in amazon_link or 'https://' in amazon_link):
+                return amazon_link
+    
+    # Method 2: Check for sidecar files (.amazon or .link)
+    for ext in ['.amazon', '.link', '.txt']:
+        sidecar_file = video_dir / f"{video_name}{ext}"
+        if sidecar_file.exists():
+            try:
+                with open(sidecar_file, 'r', encoding='utf-8') as f:
+                    link = f.read().strip()
+                    if link and 'amazon' in link.lower():
+                        return link
+            except Exception:
+                pass
+    
+    # Method 3: Check JSON mapping file
+    json_file = video_dir / "video_links.json"
+    if json_file.exists():
+        try:
+            with open(json_file, 'r', encoding='utf-8') as f:
+                links_map = json.load(f)
+                # Try exact match first
+                if video_name in links_map:
+                    return links_map[video_name]
+                # Try with extension
+                if video_path.name in links_map:
+                    return links_map[video_path.name]
+        except Exception:
+            pass
+    
+    # No link found
+    return ""
+
+
+def generate_metadata(video_name: str, platform: str, amazon_link: str = "") -> dict:
     """
     Generate metadata for a platform.
     
@@ -215,20 +553,20 @@ def generate_metadata(video_name: str, platform: str) -> dict:
     
     # Generate platform-specific content
     if platform == "youtube":
-        description = config.get_youtube_description(title, hashtags)
+        description = config.get_youtube_description(title, hashtags, amazon_link)
         metadata = {
             "title": title,
             "description": description,
             "hashtags": hashtags
         }
     elif platform == "instagram":
-        caption = config.get_instagram_caption(title, hashtags)
+        caption = config.get_instagram_caption(title, hashtags, amazon_link)
         metadata = {
             "caption": caption,
             "hashtags": hashtags
         }
     elif platform == "tiktok":
-        caption = config.get_tiktok_caption(title, hashtags)
+        caption = config.get_tiktok_caption(title, hashtags, amazon_link)
         metadata = {
             "caption": caption,
             "hashtags": hashtags
@@ -378,7 +716,8 @@ def process_video(input_path: Path, archive: bool = True) -> bool:
     """
     video_name = input_path.stem
     clip = None
-    vertical_clip = None
+    instagram_clip = None
+    tiktok_clip = None
     final_clip = None
     
     try:
@@ -395,35 +734,68 @@ def process_video(input_path: Path, archive: bool = True) -> bool:
         print("\nStep 2: Normalizing video...")
         clip = normalize_video(clip)
         
-        # Step 3: Extract segment (for MVP, use whole video or limit to max duration)
-        print("\nStep 3: Extracting clip segment...")
-        clip = extract_clip_segment(clip)
-        print(f"  Segment: {clip.duration:.2f}s")
+        # Step 3: Prepare clips for different platforms
+        print("\nStep 3: Preparing clips for platforms...")
         
-        # Step 4: Convert to vertical
-        print("\nStep 4: Converting to vertical format (1080x1920)...")
-        vertical_clip = convert_to_vertical(clip)
-        print(f"  Vertical: {vertical_clip.w}x{vertical_clip.h}")
+        # YouTube: Keep original landscape format (full length, no duration limit)
+        youtube_clip = clip
+        print(f"  YouTube: {youtube_clip.w}x{youtube_clip.h}, {youtube_clip.duration:.2f}s (original format, full length)")
         
-        # Step 5: Add CTA overlay
-        print("\nStep 5: Adding CTA overlay...")
-        final_clip = add_cta_overlay(vertical_clip)
+        # Instagram: Full length, convert to vertical format
+        print("\nStep 4: Preparing Instagram clip...")
+        print("  Converting to vertical format (1080x1920) - full length...")
+        instagram_clip = convert_to_vertical(clip)
+        print(f"  Instagram: {instagram_clip.w}x{instagram_clip.h}, {instagram_clip.duration:.2f}s (vertical, full length)")
         
-        # Step 6: Export for each platform (using date-based folders)
-        print("\nStep 6: Exporting videos...")
+        # TikTok: Full length, convert to vertical format
+        print("\nStep 5: Preparing TikTok clip...")
+        print("  Converting to vertical format (1080x1920) - full length...")
+        tiktok_clip = convert_to_vertical(clip)
+        print(f"  TikTok: {tiktok_clip.w}x{tiktok_clip.h}, {tiktok_clip.duration:.2f}s (vertical, full length)")
+        
+        # Step 6: Add CTA overlay (disabled - no overlay on videos)
+        print("\nStep 6: Skipping CTA overlay...")
+        
+        # Step 7: Extract Amazon link (once, before processing platforms)
+        print("\nStep 7: Extracting Amazon product link...")
+        amazon_link = extract_amazon_link(input_path)
+        if amazon_link:
+            print(f"  Found Amazon link: {amazon_link}")
+        else:
+            print(f"  No Amazon link found, using general creator link")
+        
+        # Step 8: Export for each platform (using date-based folders)
+        print("\nStep 8: Exporting videos...")
         date_folder = datetime.now().strftime("%Y-%m-%d")
         
         uploaded_videos = {}  # Store upload results
         
-        for platform in ["youtube", "instagram", "tiktok"]:
+        # Only process platforms that are enabled in UPLOAD_PLATFORMS
+        # If upload is disabled, process all platforms (for manual review)
+        platforms_to_process = config.UPLOAD_PLATFORMS if config.AUTO_UPLOAD_ENABLED else ["youtube", "instagram", "tiktok"]
+        
+        print(f"\nProcessing videos for platforms: {', '.join(platforms_to_process)}")
+        
+        for platform in platforms_to_process:
             output_folder = config.get_output_folder(platform, date_folder)
             output_path = output_folder / f"{video_name}.mp4"
             
+            # Choose the appropriate clip for each platform
+            if platform == "youtube":
+                # YouTube: Use original landscape format (full length)
+                platform_clip = youtube_clip
+            elif platform == "instagram":
+                # Instagram: Use full-length vertical format
+                platform_clip = instagram_clip
+            else:  # tiktok
+                # TikTok: Use full-length vertical format
+                platform_clip = tiktok_clip
+            
             # Export video
-            export_video(final_clip, output_path, platform)
+            export_video(platform_clip, output_path, platform)
             
             # Generate and save metadata
-            metadata = generate_metadata(video_name, platform)
+            metadata = generate_metadata(video_name, platform, amazon_link)
             save_metadata(metadata, output_path, platform)
             
             # Store metadata for upload step
@@ -436,15 +808,18 @@ def process_video(input_path: Path, archive: bool = True) -> bool:
         print("\nCleaning up...")
         if clip:
             clip.close()
-        if vertical_clip:
-            vertical_clip.close()
-        if final_clip:
-            final_clip.close()
+        if instagram_clip:
+            instagram_clip.close()
+        if tiktok_clip:
+            tiktok_clip.close()
+        # Note: youtube_clip is just a reference to clip, so no need to close separately
         
-        # Step 7: Upload to platforms (if enabled)
+        # Step 9: Upload to platforms (if enabled)
         if config.AUTO_UPLOAD_ENABLED and UPLOADERS_AVAILABLE:
             print(f"\n{'='*60}")
-            print("Step 7: Uploading videos to platforms...")
+            print("Step 9: Uploading videos to platforms...")
+            print(f"{'='*60}")
+            print(f"Configured platforms: {', '.join(config.UPLOAD_PLATFORMS)}")
             print(f"{'='*60}\n")
             
             upload_results = upload_videos(uploaded_videos, video_name)
@@ -484,8 +859,10 @@ def process_video(input_path: Path, archive: bool = True) -> bool:
         try:
             if clip:
                 clip.close()
-            if vertical_clip:
-                vertical_clip.close()
+            if 'instagram_clip' in locals() and instagram_clip:
+                instagram_clip.close()
+            if 'tiktok_clip' in locals() and tiktok_clip:
+                tiktok_clip.close()
             if final_clip:
                 final_clip.close()
         except:

@@ -21,6 +21,8 @@ class TikTokUploader(BaseUploader):
     Uploader for TikTok videos.
     
     Uses TikTok Content Publishing API to upload videos as drafts.
+    Uses push_by_file method (FILE_UPLOAD) - direct file upload.
+    This avoids the need for domain verification that pull_by_url requires.
     """
     
     def __init__(self):
@@ -115,6 +117,8 @@ class TikTokUploader(BaseUploader):
             # 2. Upload video file to the URL
             # 3. Publish video (or save as draft)
             
+            # Using push_by_file method (FILE_UPLOAD) - direct file upload
+            # This avoids the need for domain verification that pull_by_url requires
             # Initialize upload
             init_response = requests.post(
                 f"{self.api_base}/post/publish/video/init/",
@@ -133,7 +137,7 @@ class TikTokUploader(BaseUploader):
                         "video_cover_timestamp_ms": 1000
                     },
                     "source_info": {
-                        "source": "FILE_UPLOAD"
+                        "source": "FILE_UPLOAD"  # push_by_file method - no domain verification needed
                     }
                 }
             )

@@ -1,5 +1,5 @@
 """
-YouTube Shorts uploader using YouTube Data API v3.
+YouTube video uploader using YouTube Data API v3.
 
 Requires:
 - Google Cloud Project with YouTube Data API v3 enabled
@@ -22,7 +22,7 @@ from .base_uploader import BaseUploader
 
 class YouTubeUploader(BaseUploader):
     """
-    Uploader for YouTube Shorts.
+    Uploader for YouTube videos.
     
     Uploads videos as private (draft) so they can be reviewed before publishing.
     """
@@ -124,10 +124,8 @@ class YouTubeUploader(BaseUploader):
                 }
             }
             
-            # Mark as YouTube Short (if duration <= 60 seconds)
-            # Note: YouTube automatically detects Shorts, but we can add #Shorts to title
-            if '#Shorts' not in title:
-                body['snippet']['title'] = f"{title} #Shorts"
+            # Upload as regular YouTube video (not Shorts)
+            # Title is used as-is without #Shorts tag
             
             # Upload video
             print(f"  Uploading to YouTube...")

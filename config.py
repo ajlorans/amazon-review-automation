@@ -60,8 +60,8 @@ TARGET_WIDTH = 1080
 TARGET_HEIGHT = 1920
 
 # Default clip duration (in seconds) - can be overridden
-DEFAULT_CLIP_DURATION_MIN = 20
-DEFAULT_CLIP_DURATION_MAX = 45
+DEFAULT_CLIP_DURATION_MIN = 30
+DEFAULT_CLIP_DURATION_MAX = 60
 
 # ============================================================================
 # CTA OVERLAY SETTINGS
@@ -112,34 +112,44 @@ DEFAULT_HASHTAGS = {
 }
 
 # Platform-specific metadata templates
-def get_youtube_description(video_title: str, hashtags: list) -> str:
-    """Generate YouTube description with creator link at the top."""
+def get_youtube_description(video_title: str, hashtags: list, amazon_link: str = "") -> str:
+    """Generate YouTube description with product link (no creator link)."""
     hashtag_str = " ".join(hashtags)
-    return f"""{CREATOR_LINK}
+    
+    description_parts = []
+    
+    # Only include Amazon product link if provided
+    if amazon_link:
+        description_parts.append(amazon_link)
+    
+    # Add hashtags
+    if hashtag_str:
+        description_parts.append(hashtag_str)
+    
+    return "\n\n".join(description_parts)
 
-{video_title}
+
+def get_instagram_caption(video_title: str, hashtags: list, amazon_link: str = "") -> str:
+    """Generate Instagram caption with product link and hashtags (no title)."""
+    hashtag_str = " ".join(hashtags)
+
+    # Use product-specific link if provided, otherwise use general creator link
+    product_link = amazon_link if amazon_link else CREATOR_LINK
+    
+    return f"""{product_link}
 
 {hashtag_str}
 """
 
 
-def get_instagram_caption(video_title: str, hashtags: list) -> str:
-    """Generate Instagram caption with creator link as first line."""
+def get_tiktok_caption(video_title: str, hashtags: list, amazon_link: str = "") -> str:
+    """Generate TikTok caption with product link included."""
     hashtag_str = " ".join(hashtags)
-    return f"""{CREATOR_LINK}
 
-{video_title}
-
-{hashtag_str}
-"""
-
-
-def get_tiktok_caption(video_title: str, hashtags: list) -> str:
-    """Generate TikTok caption with creator link included."""
-    hashtag_str = " ".join(hashtags)
-    return f"""{video_title}
-
-Shop: {CREATOR_LINK}
+    # Use product-specific link if provided, otherwise use general creator link
+    product_link = amazon_link if amazon_link else CREATOR_LINK
+    
+    return f"""{product_link}
 
 {hashtag_str}
 """

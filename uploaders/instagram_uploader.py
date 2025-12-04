@@ -71,7 +71,20 @@ class InstagramUploader(BaseUploader):
                 self.authenticated = True
                 return True
             else:
+                error_data = response.json() if response.text else {}
+                error_message = error_data.get('error', {}).get('message', 'Unknown error')
                 print(f"  Error: Invalid access token - {response.status_code}")
+                print(f"  Error message: {error_message}")
+                print(f"\n  Your Instagram access token has expired or is invalid.")
+                print(f"  Instagram tokens expire after 60 days.")
+                print(f"\n  To get a new token:")
+                print(f"  1. Go to: https://developers.facebook.com/tools/explorer/")
+                print(f"  2. Select your App from the dropdown")
+                print(f"  3. Click 'Generate Access Token'")
+                print(f"  4. Select permissions: instagram_basic, instagram_content_publish")
+                print(f"  5. Click the 'i' icon next to token → 'Open in Access Token Tool'")
+                print(f"  6. Click 'Extend Access Token' to get a 60-day token")
+                print(f"  7. Copy the token and update INSTAGRAM_ACCESS_TOKEN in your .env file")
                 return False
                 
         except Exception as e:
@@ -96,6 +109,10 @@ class InstagramUploader(BaseUploader):
         file_size_mb = video_path.stat().st_size / (1024 * 1024)
         if file_size_mb > 100:
             print(f"  Error: File size ({file_size_mb:.1f}MB) exceeds Instagram Reels limit (100MB)")
+            print(f"  Suggestion: The video was encoded with dynamic bitrate, but it's still too large.")
+            print(f"  This may happen with very long videos. Consider:")
+            print(f"    - The video may need to be split into shorter segments")
+            print(f"    - Or reduce the video quality further")
             return False
         
         # Check video duration (Instagram Reels: 15-90 seconds)
@@ -147,10 +164,9 @@ class InstagramUploader(BaseUploader):
             return None
         
         try:
-            # Prepare caption with hashtags
+            # Use description as caption (hashtags are already included in description from metadata)
             caption = description
-            if tags:
-                caption += "\n\n" + " ".join(tags)
+            # Don't add tags again - they're already in the description from get_instagram_caption()
             
             # Step 1: Upload to Google Drive for backup (always do this)
             print(f"  Uploading video to Google Drive for backup...")
