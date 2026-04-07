@@ -19,7 +19,7 @@ print("Token Refresh Helper")
 print("=" * 70)
 print("\nThis script will help you refresh expired tokens for:")
 print("  1. YouTube")
-print("  2. Google Drive (used for backup)")
+print("  2. Google Drive (optional - no longer used for Instagram)")
 print()
 
 # Check which tokens need refreshing
@@ -63,29 +63,39 @@ except Exception as e:
     traceback.print_exc()
 
 print("\n" + "=" * 70)
-print("Refreshing Google Drive Token")
+print("Google Drive Token Refresh (Optional)")
 print("=" * 70)
+print("\nNote: Google Drive is no longer used for Instagram uploads.")
+print("You can skip this step unless you need Google Drive for other purposes.\n")
 
-try:
-    from uploaders.google_drive_uploader import GoogleDriveUploader
-    
-    drive_uploader = GoogleDriveUploader()
-    print("\nStarting Google Drive authentication...")
-    print("A browser window will open for authentication.\n")
-    
-    success = drive_uploader.authenticate()
-    
-    if success:
-        print("\n[SUCCESS] Google Drive token refreshed!")
-    else:
-        print("\n[FAILED] Google Drive authentication failed")
-        print("You may need to delete the old token file and try again:")
-        print(f"  Delete: {drive_token}")
+skip_drive = input("Skip Google Drive token refresh? (y/n): ").strip().lower()
+
+if skip_drive != 'y':
+    try:
+        from uploaders.google_drive_uploader import GoogleDriveUploader
         
-except Exception as e:
-    print(f"\n[ERROR] Google Drive authentication error: {e}")
-    import traceback
-    traceback.print_exc()
+        drive_uploader = GoogleDriveUploader()
+        print("\nStarting Google Drive authentication...")
+        print("A browser window will open for authentication.\n")
+        
+        success = drive_uploader.authenticate()
+        
+        if success:
+            print("\n[SUCCESS] Google Drive token refreshed!")
+        else:
+            print("\n[FAILED] Google Drive authentication failed")
+            print("You may need to delete the old token file and try again:")
+            print(f"  Delete: {drive_token}")
+            
+    except ImportError:
+        print("\n[SKIPPED] Google Drive uploader not available")
+        print("Install: pip install google-api-python-client google-auth-oauthlib")
+    except Exception as e:
+        print(f"\n[ERROR] Google Drive authentication error: {e}")
+        import traceback
+        traceback.print_exc()
+else:
+    print("\n[SKIPPED] Google Drive token refresh")
 
 print("\n" + "=" * 70)
 print("Token Refresh Complete")

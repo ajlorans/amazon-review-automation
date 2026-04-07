@@ -53,9 +53,25 @@ class YouTubeUploader(BaseUploader):
             
             # If no valid credentials, get new ones
             if not creds or not creds.valid:
+                refresh_failed = False
                 if creds and creds.expired and creds.refresh_token:
-                    creds.refresh(Request())
-                else:
+                    # Try to refresh the token
+                    try:
+                        print("  Token expired, attempting to refresh...")
+                        creds.refresh(Request())
+                        print("  [OK] Token refreshed successfully")
+                    except Exception as refresh_error:
+                        # Refresh failed - token may be revoked or expired
+                        print(f"  Token refresh failed: {refresh_error}")
+                        print("  Will request new authorization...")
+                        refresh_failed = True
+                        # Delete the old token file since it's no longer valid
+                        if token_file.exists():
+                            token_file.unlink()
+                            print("  Removed invalid token file")
+                
+                # If refresh failed or no refresh token available, get new credentials
+                if refresh_failed or not creds or not creds.valid:
                     # Get OAuth2 credentials from config
                     client_secrets_file = os.getenv("YOUTUBE_CLIENT_SECRETS_FILE")
                     if not client_secrets_file:
@@ -63,6 +79,7 @@ class YouTubeUploader(BaseUploader):
                         print("  Please download OAuth2 credentials from Google Cloud Console")
                         return False
                     
+                    print("  Opening browser for authentication...")
                     flow = InstalledAppFlow.from_client_secrets_file(
                         client_secrets_file, self.SCOPES)
                     creds = flow.run_local_server(port=0)
@@ -109,13 +126,53 @@ class YouTubeUploader(BaseUploader):
         if not self.validate_video_file(video_path):
             return None
         
+        # Verify video is in vertical format for Shorts
         try:
-            # Prepare video metadata
+            # Use MoviePy 2.x import style (matches process.py)
+            from moviepy import VideoFileClip
+            with VideoFileClip(str(video_path)) as clip:
+                width = clip.w
+                height = clip.h
+                aspect_ratio = width / height if height > 0 else 0
+                print(f"  Video dimensions: {width}x{height} (aspect ratio: {aspect_ratio:.2f})")
+                
+                # YouTube Shorts should be vertical (9:16 = 0.5625)
+                # Accept range 0.5 to 0.6 to account for slight variations
+                if aspect_ratio < 0.5 or aspect_ratio > 0.6:
+                    print(f"  Warning: Video aspect ratio ({aspect_ratio:.2f}) may not be optimal for YouTube Shorts")
+                    print(f"  Expected: ~0.56 (9:16 vertical format)")
+                else:
+                    print(f"  ✓ Video format is vertical (suitable for YouTube Shorts)")
+        except ImportError as e:
+            # MoviePy not available - skip verification (upload will still work)
+            print(f"  Note: Could not verify video format (MoviePy not available): {e}")
+        except Exception as e:
+            # Other errors during verification - non-critical
+            print(f"  Note: Could not verify video format: {e}")
+        
+        try:
+            # Prepare video metadata for YouTube Shorts
+            # Add #Shorts to title to mark as YouTube Short
+            shorts_title = title
+            if "#Shorts" not in title and "#shorts" not in title:
+                shorts_title = f"{title} #Shorts"
+            
+            # Add "Shorts" to tags if not already present
+            shorts_tags = tags.copy() if tags else []
+            if "Shorts" not in shorts_tags and "shorts" not in [t.lower() for t in shorts_tags]:
+                shorts_tags.append("Shorts")
+            
+            # Add Shorts indicator to description
+            shorts_description = description
+            if "#Shorts" not in description and "#shorts" not in description.lower():
+                # Add at the beginning of description
+                shorts_description = f"#Shorts\n\n{description}"
+            
             body = {
                 'snippet': {
-                    'title': title,
-                    'description': description,
-                    'tags': tags or [],
+                    'title': shorts_title,
+                    'description': shorts_description,
+                    'tags': shorts_tags,
                     'categoryId': '22'  # People & Blogs category
                 },
                 'status': {
@@ -124,8 +181,11 @@ class YouTubeUploader(BaseUploader):
                 }
             }
             
-            # Upload as regular YouTube video (not Shorts)
-            # Title is used as-is without #Shorts tag
+            # Upload as YouTube Short (vertical format, full length)
+            # YouTube automatically detects Shorts based on:
+            # - Vertical format (9:16 aspect ratio)
+            # - #Shorts in title/description
+            # - Video characteristics
             
             # Upload video
             print(f"  Uploading to YouTube...")
@@ -152,10 +212,13 @@ class YouTubeUploader(BaseUploader):
             
             if 'id' in response:
                 video_id = response['id']
-                print(f"  [OK] Video uploaded successfully!")
+                print(f"  [OK] Video uploaded successfully as YouTube Short!")
                 print(f"  Video ID: {video_id}")
                 print(f"  Status: {privacy_status} (draft)")
                 print(f"  URL: https://www.youtube.com/watch?v={video_id}")
+                print(f"  Note: YouTube will automatically detect this as a Short based on:")
+                print(f"    - Vertical format (9:16 aspect ratio)")
+                print(f"    - #Shorts tag in title/description")
                 
                 return {
                     'video_id': video_id,

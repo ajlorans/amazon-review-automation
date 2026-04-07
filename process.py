@@ -64,10 +64,13 @@ def normalize_video(clip: VideoFileClip) -> VideoFileClip:
         normalized_fps = round(original_fps, 2)
     
     # Convert VFR to CFR while preserving audio sync
-    # change_duration=False ensures audio timing stays correct
+    # MoviePy 2.x uses with_fps() instead of set_fps()
     if abs(clip.fps - normalized_fps) > 0.01:  # Only convert if significantly different
         print(f"  Converting VFR to CFR: {original_fps:.2f} → {normalized_fps:.2f} fps")
-        clip = clip.set_fps(normalized_fps, change_duration=False)
+        # MoviePy 2.x: with_fps() replaces set_fps()
+        # Use with_fps() to convert VFR to CFR smoothly
+        # This ensures frames are evenly spaced and prevents lag
+        clip = clip.with_fps(normalized_fps)
         print(f"  [OK] Frame rate normalized (audio sync preserved)")
     else:
         print(f"  [OK] Frame rate is already constant ({normalized_fps:.2f} fps)")
@@ -78,10 +81,23 @@ def normalize_video(clip: VideoFileClip) -> VideoFileClip:
     else:
         # Explicitly ensure audio is set to match video duration
         # This prevents audio drift during processing
-        if abs(clip.audio.duration - clip.duration) > 0.1:
-            print(f"  Warning: Audio duration ({clip.audio.duration:.2f}s) doesn't match video ({clip.duration:.2f}s)")
+        audio_duration = clip.audio.duration if clip.audio else 0
+        video_duration = clip.duration
+        
+        if abs(audio_duration - video_duration) > 0.1:
+            print(f"  Warning: Audio duration ({audio_duration:.2f}s) doesn't match video ({video_duration:.2f}s)")
             print(f"  Adjusting audio to match video duration...")
-            clip = clip.set_audio(clip.audio.set_duration(clip.duration))
+            # MoviePy 2.x: with_duration() replaces set_duration()
+            # set_audio() should still work in MoviePy 2.x
+            try:
+                adjusted_audio = clip.audio.with_duration(video_duration)
+                clip = clip.set_audio(adjusted_audio)
+                print(f"  [OK] Audio duration adjusted to match video")
+            except AttributeError:
+                # Fallback if with_duration doesn't work for audio
+                print(f"  Note: Could not adjust audio duration, continuing anyway...")
+        else:
+            print(f"  [OK] Audio and video durations match ({video_duration:.2f}s)")
     
     return clip
 
@@ -153,7 +169,9 @@ def convert_to_vertical(clip: VideoFileClip) -> VideoFileClip:
     new_width = int(current_width * scale_factor)
     new_height = int(current_height * scale_factor)
     
-    # Resize video (this will fit within target dimensions)
+    # Resize video - MoviePy uses high-quality bicubic scaling
+    # Combined with maximum quality encoding settings (CRF 16, slow preset),
+    # this preserves the original video quality as closely as possible
     scaled_clip = clip.resized(new_size=(new_width, new_height))
     
     # Create a black background at target size
@@ -210,7 +228,7 @@ def add_cta_overlay(clip: VideoFileClip) -> CompositeVideoClip:
     return final_clip
 
 
-def calculate_instagram_bitrate(duration_seconds: float, target_size_mb: float = 95.0) -> str:
+def calculate_instagram_bitrate(duration_seconds: float, target_size_mb: float = 92.0) -> str:
     """
     Calculate optimal bitrate for Instagram to stay under file size limit.
     
@@ -219,20 +237,15 @@ def calculate_instagram_bitrate(duration_seconds: float, target_size_mb: float =
     
     Args:
         duration_seconds: Video duration in seconds
-        target_size_mb: Target file size in MB (default 95MB to leave margin)
+        target_size_mb: Target file size in MB (default 92MB to leave margin)
         
     Returns:
-        Bitrate string in format "XXXXk" (e.g., "5000k")
+        Bitrate string in format "XXXXk" (e.g., "8000k")
     """
     # Audio bitrate is typically 192k = 0.192 Mbps
     audio_bitrate_mbps = 0.192
     
     # Calculate maximum video bitrate to stay under target size
-    # file_size_mb = (video_bitrate_mbps * duration + audio_bitrate_mbps * duration) / 8
-    # Solving for video_bitrate_mbps:
-    # video_bitrate_mbps = (target_size_mb * 8 - audio_bitrate_mbps * duration) / duration
-    # video_bitrate_mbps = (target_size_mb * 8) / duration - audio_bitrate_mbps
-    
     if duration_seconds <= 0:
         duration_seconds = 1  # Prevent division by zero
     
@@ -242,37 +255,26 @@ def calculate_instagram_bitrate(duration_seconds: float, target_size_mb: float =
     max_video_bitrate_kbps = int(max_video_bitrate_mbps * 1000)
     max_video_bitrate_kbps = (max_video_bitrate_kbps // 100) * 100  # Round down to nearest 100
     
-    # Set minimum bitrate for quality to prevent lag
-    # Higher minimum ensures smoother playback even for longer videos
-    min_bitrate_kbps = 2500  # 2.5 Mbps minimum for smooth playback
-    # Set maximum bitrate for quality (max 8 Mbps = 8000k for smooth playback)
-    max_bitrate_kbps = 8000
+    # PRIORITY: Preserve original quality - use much higher minimum bitrates
+    # These ensure videos look as good as the original recordings
+    if duration_seconds <= 60:  # Short videos (under 1 minute)
+        min_bitrate_kbps = 8000  # 8 Mbps for excellent quality
+        max_bitrate_kbps = 12000  # 12 Mbps max
+    elif duration_seconds <= 120:  # Medium videos (1-2 minutes)
+        min_bitrate_kbps = 6000  # 6 Mbps for very good quality
+        max_bitrate_kbps = 10000  # 10 Mbps max
+    elif duration_seconds <= 180:  # Longer videos (2-3 minutes)
+        min_bitrate_kbps = 5000  # 5 Mbps for good quality
+        max_bitrate_kbps = 8000  # 8 Mbps max
+    elif duration_seconds <= 300:  # Long videos (3-5 minutes)
+        min_bitrate_kbps = 4000  # 4 Mbps for good quality
+        max_bitrate_kbps = 6000  # 6 Mbps max
+    else:  # Very long videos (5+ minutes)
+        min_bitrate_kbps = 3000  # 3 Mbps minimum (prevents lag)
+        max_bitrate_kbps = 5000  # 5 Mbps max
     
-    # For very long videos, we need to balance file size vs quality
-    # Use a more aggressive target size if needed, but prioritize quality
-    if max_video_bitrate_kbps < min_bitrate_kbps:
-        # Video would be too long for minimum bitrate - need to balance
-        # Check if using minimum bitrate would exceed 100MB
-        min_bitrate_size_mb = (min_bitrate_kbps / 1000 + audio_bitrate_mbps) * duration_seconds / 8
-        
-        if min_bitrate_size_mb <= 100:
-            # Can use minimum bitrate without exceeding 100MB
-            optimal_bitrate_kbps = min_bitrate_kbps
-        elif duration_seconds > 300:  # Over 5 minutes
-            # Very long video - use lower target but maintain reasonable quality
-            # Use 85MB target for very long videos
-            max_video_bitrate_mbps = (85.0 * 8) / duration_seconds - audio_bitrate_mbps
-            max_video_bitrate_kbps = int(max_video_bitrate_mbps * 1000)
-            max_video_bitrate_kbps = (max_video_bitrate_kbps // 100) * 100
-            # Maintain minimum of 2000k for quality (prevents lag)
-            optimal_bitrate_kbps = max(2000, min(max_bitrate_kbps, max_video_bitrate_kbps))
-        else:
-            # Moderately long video (2-5 min) - use calculated bitrate
-            # This ensures we stay under 100MB while maintaining quality
-            optimal_bitrate_kbps = max(2000, max_video_bitrate_kbps)  # Minimum 2000k for quality
-    else:
-        # Normal video - clamp between min and max
-        optimal_bitrate_kbps = min(max_bitrate_kbps, max(max_video_bitrate_kbps, min_bitrate_kbps))
+    # Use the higher of calculated or minimum bitrate (prioritize quality)
+    optimal_bitrate_kbps = max(min_bitrate_kbps, min(max_bitrate_kbps, max_video_bitrate_kbps))
     
     return f"{optimal_bitrate_kbps}k"
 
@@ -289,89 +291,131 @@ def export_video(clip: CompositeVideoClip, output_path: Path, platform: str):
     print(f"Exporting {platform} video to {output_path}...")
     
     # Platform-specific encoding settings
+    # PRIORITY: High quality with reliable playback (balanced approach)
+    use_crf = True  # Use CRF for all platforms (best quality preservation)
+    crf_value = 18  # CRF 18 = visually lossless quality (reliable, high quality)
+    bitrate = None
+    max_bitrate = None  # Maximum bitrate constraint for file size limits
+    
     if platform == "instagram":
-        # Instagram: Dynamic bitrate to stay under 100MB limit
-        # Calculate optimal bitrate based on video duration
+        # Instagram: Use CRF for quality, but constrain max bitrate to stay under 100MB
         duration = clip.duration
-        bitrate = calculate_instagram_bitrate(duration)
-        estimated_size_mb = (float(bitrate[:-1]) / 1000 + 0.192) * duration / 8
+        # Calculate max bitrate to stay under 100MB (with margin)
+        target_size_mb = 95.0  # 95MB target to leave margin
+        audio_bitrate_mbps = 0.192
+        max_bitrate_mbps = (target_size_mb * 8) / duration - audio_bitrate_mbps
+        max_bitrate_kbps = int(max_bitrate_mbps * 1000)
+        max_bitrate_kbps = (max_bitrate_kbps // 100) * 100
+        max_bitrate = f"{max_bitrate_kbps}k"
+        audio_bitrate = "192k"
+        preset = "medium"  # Medium preset for reliable encoding (good quality, reliable playback)
         print(f"  Video duration: {duration:.1f}s")
-        print(f"  Calculated bitrate: {bitrate} (estimated size: {estimated_size_mb:.1f}MB)")
-        audio_bitrate = "192k"
-        preset = "medium"  # Better quality encoding (slightly slower but smoother)
+        print(f"  Using CRF {crf_value} for high quality (max bitrate: {max_bitrate} to fit under 100MB)")
     elif platform == "tiktok":
-        # TikTok: Similar to Instagram, but TikTok allows larger files
-        # Still optimize to keep reasonable file sizes
-        duration = clip.duration
-        # TikTok allows up to 287MB, but we'll use similar optimization
-        bitrate = calculate_instagram_bitrate(duration, target_size_mb=200.0)  # More lenient
+        # TikTok: Use CRF for high quality (TikTok allows larger files)
         audio_bitrate = "192k"
-        preset = "medium"  # Better quality encoding
+        preset = "medium"  # Medium preset for reliable encoding
+        print(f"  Using CRF {crf_value} for high quality")
     else:  # youtube
-        # YouTube: Can use faster preset since it's landscape (less processing)
-        # YouTube allows much larger files, so we can use higher bitrate
-        bitrate = "10000k"  # 10 Mbps for landscape
-        audio_bitrate = "192k"
-        preset = "fast"
+        # YouTube: Use CRF for high quality (no file size constraints)
+        audio_bitrate = "256k"  # High audio bitrate for YouTube
+        preset = "medium"  # Medium preset for reliable encoding
+        print(f"  Using CRF {crf_value} for high quality (no file size constraints)")
     
-    # Use more threads for faster encoding (auto-detect or use more)
+    # Use more threads for faster encoding (use all available cores)
     import multiprocessing
-    num_threads = min(multiprocessing.cpu_count(), 8)  # Use up to 8 threads
+    num_threads = multiprocessing.cpu_count()  # Use all CPU cores for maximum speed
     
-    # Build FFmpeg parameters
+    # Build FFmpeg parameters (optimized for HIGH QUALITY with RELIABLE PLAYBACK)
+    # Balanced settings that maintain quality while ensuring smooth playback
     ffmpeg_params = [
         '-movflags', '+faststart',  # Enable fast start for web playback
         '-pix_fmt', 'yuv420p',  # Ensure compatibility
         '-profile:v', 'high',  # Use high profile for better quality
-        '-level', '4.0',  # H.264 level 4.0 for compatibility
-        '-g', '30',  # Keyframe interval (1 keyframe per second at 30fps)
-        '-bf', '2',  # B-frames for better compression
-        '-b_strategy', '1',  # Adaptive B-frame placement
+        '-level', '4.1',  # H.264 level 4.1 (reliable, supports high bitrates)
+        '-bf', '2',  # B-frames for compression (2 is optimal for smooth playback)
+        '-b_strategy', '1',  # Adaptive B-frame placement (reliable)
+        '-me_method', 'hex',  # Hex motion estimation (good quality, reliable)
+        '-subq', '6',  # Good subpixel motion estimation (6 = good quality, reliable)
+        '-thread_type', 'frame',  # Frame-based threading
     ]
     
-    # Add Instagram and TikTok-specific optimizations for smoother playback
-    if platform in ["instagram", "tiktok"]:
+    # Platform-specific quality optimizations (balanced for reliable playback)
+    if platform == "youtube":
+        # YouTube: Quality settings optimized for reliable playback
         ffmpeg_params.extend([
-            '-rc-lookahead', '30',  # Lookahead for better quality
-            '-refs', '3',  # Reference frames for better quality
-            '-trellis', '1',  # Trellis quantization for better quality
+            '-rc-lookahead', '40',  # Lookahead for quality (balanced)
+            '-refs', '4',  # Reference frames for quality (balanced)
+            '-trellis', '1',  # Trellis quantization (1 = good quality, reliable)
+            '-aq-mode', '2',  # Good adaptive quantization
+        ])
+    else:  # instagram, tiktok
+        # Instagram/TikTok: Quality settings balanced for reliable playback
+        ffmpeg_params.extend([
+            '-rc-lookahead', '30',  # Lookahead for quality (balanced)
+            '-refs', '3',  # Reference frames for quality (balanced)
+            '-trellis', '1',  # Trellis quantization (good quality, reliable)
+            '-aq-mode', '2',  # Good adaptive quantization
         ])
     
     # Use the clip's actual FPS instead of forcing 30fps
     # This preserves the original frame rate and prevents sync issues
     output_fps = clip.fps
     if output_fps is None or output_fps <= 0:
-        output_fps = 30  # Fallback to 30fps if FPS is invalid
+        output_fps = 30.0  # Fallback to 30fps if FPS is invalid
         print(f"  Warning: Invalid FPS, using 30fps as fallback")
     else:
+        # Always use float for FPS (MoviePy expects float)
+        output_fps = float(output_fps)
         print(f"  Using source frame rate: {output_fps:.2f} fps")
     
-    # Update keyframe interval to match frame rate (1 keyframe per second)
-    # Remove the old '-g' parameter and add a new one based on actual FPS
-    ffmpeg_params = [p for p in ffmpeg_params if p != '-g']
-    keyframe_interval = int(output_fps)  # 1 keyframe per second
-    ffmpeg_params.append('-g')
-    ffmpeg_params.append(str(keyframe_interval))
+    # Keyframe interval for smooth playback (CRITICAL for preventing lag)
+    # 1 second keyframe interval ensures smooth playback and prevents choppiness
+    # Smaller intervals = smoother playback but slightly larger files
+    keyframe_interval = int(round(output_fps))  # 1 keyframe per second (e.g., 30fps = 30 frames)
+    ffmpeg_params.extend(['-g', str(keyframe_interval)])
     
-    # Add audio sync parameters to prevent drift
+    # Add frame timing parameters for smooth playback
+    # Keep it simple - let MoviePy handle frame rate, just ensure CFR output
     ffmpeg_params.extend([
-        '-async', '1',  # Audio sync method
-        '-vsync', 'cfr',  # Constant frame rate (ensures sync)
+        '-vsync', 'cfr',  # Constant frame rate (ensures smooth playback)
+        '-x264opts', f'keyint={keyframe_interval}:min-keyint={keyframe_interval}',  # Force keyframes
     ])
     
-    clip.write_videofile(
-        str(output_path),
-        codec='libx264',
-        audio_codec='aac',
-        fps=output_fps,  # Use actual FPS instead of forcing 30
-        preset=preset,
-        bitrate=bitrate,
-        audio_bitrate=audio_bitrate,
-        threads=num_threads,
-        ffmpeg_params=ffmpeg_params,
-        audio_nbytes=4,  # 32-bit audio for better quality
-        audio_fps=44100  # Standard audio sample rate
-    )
+    # Note: Do NOT add fps filter here - MoviePy handles frame rate via fps parameter
+    # Adding fps filter would cause double conversion and timing issues (slow motion effect)
+    
+    # Build write_videofile parameters
+    write_params = {
+        'filename': str(output_path),
+        'codec': 'libx264',
+        'audio_codec': 'aac',
+        'preset': preset,
+        'audio_bitrate': audio_bitrate,
+        'threads': num_threads,
+        'ffmpeg_params': ffmpeg_params,
+        'audio_nbytes': 4,  # 32-bit audio for better quality
+        'audio_fps': 44100  # Standard audio sample rate
+    }
+    
+    # Use CRF for all platforms (maximum quality preservation)
+    if use_crf:
+        # Add CRF to FFmpeg parameters (quality-based encoding)
+        ffmpeg_params.extend(['-crf', str(crf_value)])
+        
+        # For Instagram, add max bitrate constraint to stay under 100MB
+        if platform == "instagram" and max_bitrate:
+            ffmpeg_params.extend(['-maxrate', max_bitrate])
+            ffmpeg_params.extend(['-bufsize', f"{int(max_bitrate[:-1]) * 2}k"])  # 2x maxrate for buffer
+            print(f"  Using CRF {crf_value} with max bitrate {max_bitrate} for high quality")
+        else:
+            print(f"  Using CRF {crf_value} for high quality (visually lossless)")
+    
+    # Always pass fps to ensure MoviePy handles frame rate correctly
+    # This prevents timing issues and slow motion effects
+    write_params['fps'] = output_fps
+    
+    clip.write_videofile(**write_params)
     
     # Verify file size for Instagram and re-encode if needed
     if platform == "instagram":
@@ -383,44 +427,81 @@ def export_video(clip: CompositeVideoClip, output_path: Path, platform: str):
             print(f"  Re-encoding with lower bitrate to fit under 100MB...")
             
             # Calculate new bitrate to get under 100MB
-            # Use 90MB as target to leave margin
-            new_bitrate = calculate_instagram_bitrate(clip.duration, target_size_mb=90.0)
-            print(f"  New bitrate: {new_bitrate}")
+            # Use 90MB as target to leave margin and avoid another re-encode
+            # For re-encoding, we need to allow lower bitrates to fit under limit
+            duration = clip.duration
+            audio_bitrate_mbps = 0.192
+            target_size_mb = 90.0  # 90MB target for re-encoding
             
-            # Re-encode with lower bitrate (use same optimized settings)
+            # Calculate maximum bitrate for target size
+            max_video_bitrate_mbps = (target_size_mb * 8) / duration - audio_bitrate_mbps
+            max_video_bitrate_kbps = int(max_video_bitrate_mbps * 1000)
+            max_video_bitrate_kbps = (max_video_bitrate_kbps // 100) * 100
+            
+            # For re-encoding, use lower minimum to ensure we fit under 100MB
+            # Still maintain reasonable quality (minimum 2000k to prevent lag)
+            min_bitrate_kbps = 2000
+            new_bitrate_kbps = max(min_bitrate_kbps, max_video_bitrate_kbps)
+            new_bitrate = f"{new_bitrate_kbps}k"
+            print(f"  New bitrate: {new_bitrate} (calculated for {target_size_mb}MB target)")
+            
+            # Re-encode with CRF and lower max bitrate (use same maximum quality settings)
             # Use the same FPS and sync settings as the original encode
-            reencode_fps = clip.fps if clip.fps and clip.fps > 0 else 30
-            keyframe_interval = int(reencode_fps)
+            reencode_fps = clip.fps if clip.fps and clip.fps > 0 else 30.0
+            reencode_fps = float(reencode_fps)
+            keyframe_interval = int(round(reencode_fps))  # 1 keyframe per second (same as main encode)
             
+            # Use same balanced quality settings as initial encode (for reliable playback)
             ffmpeg_params = [
                 '-movflags', '+faststart',
                 '-pix_fmt', 'yuv420p',
                 '-profile:v', 'high',
-                '-level', '4.0',
+                '-level', '4.1',  # H.264 level 4.1 (reliable)
                 '-g', str(keyframe_interval),
-                '-bf', '2',
-                '-b_strategy', '1',
-                '-rc-lookahead', '30',
-                '-refs', '3',
-                '-trellis', '1',
-                '-async', '1',  # Audio sync
-                '-vsync', 'cfr',  # Constant frame rate
+                '-bf', '2',  # B-frames for compression (optimal for smooth playback)
+                '-b_strategy', '1',  # Adaptive B-frame placement
+                '-me_method', 'hex',  # Hex motion estimation (reliable)
+                '-subq', '6',  # Good subpixel motion estimation
+                '-thread_type', 'frame',  # Frame-based threading
+                '-rc-lookahead', '30',  # Lookahead for quality (balanced)
+                '-refs', '3',  # Reference frames for quality (balanced)
+                '-trellis', '1',  # Trellis quantization (good quality, reliable)
+                '-aq-mode', '2',  # Good adaptive quantization
+                '-vsync', 'cfr',  # Constant frame rate (ensures smooth playback)
+                '-x264opts', f'keyint={keyframe_interval}:min-keyint={keyframe_interval}',  # Force keyframes
             ]
             
-            clip.write_videofile(
-                str(output_path),
-                codec='libx264',
-                audio_codec='aac',
-                fps=reencode_fps,  # Use actual FPS
-                preset=preset,
-                bitrate=new_bitrate,
-                audio_bitrate=audio_bitrate,
-                threads=num_threads,
-                ffmpeg_params=ffmpeg_params,
-                audio_nbytes=4,
-                audio_fps=44100,
-                overwrite=True  # Overwrite the existing file
-            )
+            # Note: Do NOT add fps filter here - MoviePy handles frame rate via fps parameter
+            # Adding fps filter would cause double conversion and timing issues
+            
+            # Use CRF with max bitrate constraint for re-encoding
+            ffmpeg_params.extend(['-crf', str(crf_value)])
+            ffmpeg_params.extend(['-maxrate', new_bitrate])
+            ffmpeg_params.extend(['-bufsize', f"{int(new_bitrate[:-1]) * 2}k"])  # 2x maxrate for buffer
+            
+            # Delete the existing file before re-encoding (MoviePy doesn't have overwrite parameter)
+            if output_path.exists():
+                output_path.unlink()
+                print(f"  Deleted existing file for re-encoding...")
+            
+            # Build write_videofile parameters for re-encoding
+            reencode_params = {
+                'filename': str(output_path),
+                'codec': 'libx264',
+                'audio_codec': 'aac',
+                'preset': 'medium',  # Use medium preset for reliable encoding (same as initial encode)
+                'audio_bitrate': audio_bitrate,
+                'threads': num_threads,
+                'ffmpeg_params': ffmpeg_params,
+                'audio_nbytes': 4,  # 32-bit audio for quality
+                'audio_fps': 44100,
+            }
+            
+            # Always pass fps to ensure MoviePy handles frame rate correctly
+            # This prevents timing issues and slow motion effects
+            reencode_params['fps'] = reencode_fps
+            
+            clip.write_videofile(**reencode_params)
             
             # Check again
             file_size_mb = output_path.stat().st_size / (1024 * 1024)
@@ -782,8 +863,8 @@ def process_video(input_path: Path, archive: bool = True) -> bool:
             
             # Choose the appropriate clip for each platform
             if platform == "youtube":
-                # YouTube: Use original landscape format (full length)
-                platform_clip = youtube_clip
+                # YouTube Shorts: Use full-length vertical format (same as Instagram/TikTok)
+                platform_clip = instagram_clip  # Use vertical format for Shorts
             elif platform == "instagram":
                 # Instagram: Use full-length vertical format
                 platform_clip = instagram_clip

@@ -84,13 +84,29 @@ CTA_OPACITY = 0.8
 # Default hashtags for each platform
 DEFAULT_HASHTAGS = {
     "youtube": [
-        "#AmazonReview",
-        "#ProductReview",
-        "#AmazonFinds",
-        "#Unboxing",
+        "#Shorts", 
+        "#YouTubeShorts", 
+        "#AmazonFinds", 
+        "#AmazonReview", 
+        "#AmazonMustHaves", 
+        "#Unboxing", 
+        "#ProductReview", 
+        "#LifeHacks", 
+        "#Trending", 
+        "#Viral"
         "#Review",
     ],
     "instagram": [
+        "#AmazonFavorites", 
+        "#FoundItOnAmazon", 
+        "#AmazonInfluencer", 
+        "#ShopMyPost", 
+        "#AmazonHome", 
+        "#AmazonFashion", 
+        "#ReelsInstagram", 
+        "#IGShopping", 
+        "#ExplorePage", 
+        "#GiftIdeas"
         "#AmazonReview",
         "#ProductReview",
         "#AmazonFinds",
@@ -100,6 +116,15 @@ DEFAULT_HASHTAGS = {
         "#Shopping",
     ],
     "tiktok": [
+        "#TikTokMadeMeBuyIt", 
+        "#AmazonMustHaves", 
+        "#AmazonHaul", 
+        "#EverythingYouNeed", 
+        "#ShoppingHaul", 
+        "#FYP", 
+        "#ForYouPage", 
+        "#Viral", 
+        "#AmazonDeals"
         "#AmazonReview",
         "#ProductReview",
         "#AmazonFinds",

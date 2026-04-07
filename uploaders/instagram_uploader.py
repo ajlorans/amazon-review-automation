@@ -32,8 +32,8 @@ class InstagramUploader(BaseUploader):
         self.access_token = None
         self.instagram_account_id = None
         self.api_base = "https://graph.instagram.com"
-        # Storage preference: s3 > google_drive > direct
-        self.storage_type = os.getenv("INSTAGRAM_STORAGE_TYPE", "s3").lower()  # "s3", "google_drive", or "direct"
+        # Storage: S3 only (Google Drive removed for performance)
+        self.storage_type = "s3"  # Only S3 is supported
         self.last_s3_key = None  # Store S3 key for cleanup
     
     def authenticate(self) -> bool:
@@ -168,116 +168,54 @@ class InstagramUploader(BaseUploader):
             caption = description
             # Don't add tags again - they're already in the description from get_instagram_caption()
             
-            # Step 1: Upload to Google Drive for backup (always do this)
-            print(f"  Uploading video to Google Drive for backup...")
-            try:
-                from .google_drive_uploader import GoogleDriveUploader
-                drive_uploader = GoogleDriveUploader()
-                drive_file_id = drive_uploader.upload_video_for_backup(video_path)
-                if drive_file_id:
-                    print(f"  [OK] Video backed up to Google Drive")
-                else:
-                    print(f"  Warning: Google Drive backup failed, continuing anyway...")
-            except ImportError:
-                print(f"  Warning: Google Drive uploader not available, skipping backup")
-            except Exception as e:
-                print(f"  Warning: Google Drive backup failed: {e}, continuing anyway...")
-            
-            # Step 2: Get video URL for Instagram (upload to S3)
+            # Step 1: Upload video to S3 for Instagram
+            print(f"  Uploading video to AWS S3 for Instagram...")
             video_url = None
             self.last_s3_key = None  # Reset for cleanup tracking
             
-            if self.storage_type == "s3":
-                print(f"  Uploading video to AWS S3 for Instagram...")
-                try:
-                    from .s3_uploader import S3Uploader
-                    s3_uploader = S3Uploader()
-                    video_url = s3_uploader.upload_video_and_get_url(video_path)
-                    
-                    if not video_url:
-                        print(f"  Error: Failed to upload to S3")
-                        return None
-                    
-                    # Store S3 key for cleanup
-                    self.last_s3_key = getattr(s3_uploader, 'last_uploaded_key', None)
-                    print(f"  [OK] Video uploaded to S3, got public URL")
-                except ImportError:
-                    print(f"  Error: S3 uploader not available")
-                    print(f"  Install: pip install boto3")
-                    print(f"  Falling back to Google Drive...")
-                    self.storage_type = "google_drive"
-                except Exception as e:
-                    print(f"  Error uploading to S3: {e}")
-                    print(f"  Falling back to Google Drive...")
-                    self.storage_type = "google_drive"
-            
-            if self.storage_type == "google_drive" and not video_url:
-                print(f"  Uploading video to Google Drive for Instagram URL...")
-                try:
-                    from .google_drive_uploader import GoogleDriveUploader
-                    drive_uploader = GoogleDriveUploader()
-                    video_url = drive_uploader.upload_video_and_get_url(video_path)
-                    
-                    if not video_url:
-                        print(f"  Error: Failed to upload to Google Drive")
-                        return None
-                    
-                    print(f"  [OK] Video uploaded to Google Drive, got public URL")
-                except ImportError:
-                    print(f"  Error: Google Drive uploader not available")
-                    print(f"  Install: pip install google-api-python-client google-auth-oauthlib")
+            try:
+                from .s3_uploader import S3Uploader
+                s3_uploader = S3Uploader()
+                video_url = s3_uploader.upload_video_and_get_url(video_path)
+                
+                if not video_url:
+                    print(f"  Error: Failed to upload to S3")
                     return None
-                except Exception as e:
-                    print(f"  Error uploading to Google Drive: {e}")
-                    return None
+                
+                # Store S3 key for cleanup
+                self.last_s3_key = getattr(s3_uploader, 'last_uploaded_key', None)
+                print(f"  [OK] Video uploaded to S3, got public URL")
+            except ImportError:
+                print(f"  Error: S3 uploader not available")
+                print(f"  Install: pip install boto3")
+                return None
+            except Exception as e:
+                print(f"  Error uploading to S3: {e}")
+                return None
             
             if not video_url:
                 print(f"  Error: No video URL available")
                 return None
             
-            # Step 3: Create Instagram media container with video URL
+            # Step 2: Create Instagram media container with video URL
             print(f"  Creating Instagram Reel container...")
             
             # Instagram Graph API endpoint for creating media
             upload_url = f"{self.api_base}/{self.instagram_account_id}/media"
             
-            if video_url:
-                # Use video URL (from Google Drive)
-                data = {
-                    'media_type': 'REELS',
-                    'video_url': video_url,
-                    'caption': caption,
-                    'share_to_feed': 'true'
-                }
-                
-                params = {
-                    'access_token': self.access_token
-                }
-                
-                response = requests.post(upload_url, data=data, params=params)
-            else:
-                # Try direct file upload (usually doesn't work)
-                with open(video_path, 'rb') as video_file:
-                    files = {
-                        'video_file': (video_path.name, video_file, 'video/mp4')
-                    }
-                    
-                    data = {
-                        'media_type': 'REELS',
-                        'caption': caption,
-                        'share_to_feed': 'true'
-                    }
-                    
-                    params = {
-                        'access_token': self.access_token
-                    }
-                    
-                    response = requests.post(
-                        upload_url,
-                        files=files,
-                        data=data,
-                        params=params
-                    )
+            # Use video URL from S3
+            data = {
+                'media_type': 'REELS',
+                'video_url': video_url,
+                'caption': caption,
+                'share_to_feed': 'true'
+            }
+            
+            params = {
+                'access_token': self.access_token
+            }
+            
+            response = requests.post(upload_url, data=data, params=params)
             
             if response.status_code != 200:
                 print(f"  Error creating media container: {response.status_code}")
@@ -286,10 +224,9 @@ class InstagramUploader(BaseUploader):
                 error_data = response.json() if response.text else {}
                 error_message = error_data.get('error', {}).get('message', 'Unknown error')
                 
-                if 'video_url' in error_message.lower() and not video_url:
-                    print(f"  Error: Instagram requires video_url parameter")
-                    print(f"  Enable Google Drive upload by setting INSTAGRAM_USE_GOOGLE_DRIVE=true in .env")
-                    return None
+                if 'video_url' in error_message.lower():
+                    print(f"  Error: Instagram cannot access the S3 video URL")
+                    print(f"  Verify S3 bucket is publicly accessible and URL is correct")
                 
                 return None
             
@@ -303,7 +240,7 @@ class InstagramUploader(BaseUploader):
             
             print(f"  [OK] Media container created: {container_id}")
             
-            # Step 2: Check container status until it's ready
+            # Step 3: Check container status until it's ready
             print(f"  Waiting for video processing...")
             max_attempts = 30  # Wait up to 5 minutes (10 seconds * 30)
             attempt = 0
@@ -328,7 +265,7 @@ class InstagramUploader(BaseUploader):
                         print(f"  [OK] Video processed successfully!")
                         print(f"  Status details: {status_data}")
                         
-                        # Step 3: Publish the reel (required for it to appear in Instagram)
+                        # Step 4: Publish the reel (required for it to appear in Instagram)
                         # Instagram Reels need to be published to appear, even as drafts
                         print(f"  Publishing reel (container ID: {container_id})...")
                         publish_url = f"{self.api_base}/{self.instagram_account_id}/media_publish"
